@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api } from '../services/api';
 import type { AuthUser } from '../types';
+import { encryptField } from '../utils/crypto';
 
 interface LoginValues {
   email: string;
@@ -31,7 +32,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   const login = async (values: LoginValues) => {
-    const { data } = await api.post<{ token: string; user: AuthUser }>('/login', values);
+    const encryptedValues = {
+      email: encryptField(values.email),
+      password: encryptField(values.password),
+    };
+    const { data } = await api.post<{ token: string; user: AuthUser }>('/login', encryptedValues);
     localStorage.setItem('studentflow_token', data.token);
     localStorage.setItem('studentflow_user', JSON.stringify(data.user));
     setToken(data.token);

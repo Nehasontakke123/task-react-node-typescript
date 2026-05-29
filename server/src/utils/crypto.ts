@@ -38,6 +38,21 @@ export const encryptFrontendPayload = <T>(payload: T): string => {
   return CryptoJS.AES.encrypt(JSON.stringify(payload), getFrontendSecret()).toString();
 };
 
+export const decryptFrontendField = (cipherText: string): string => {
+  const bytes = CryptoJS.AES.decrypt(cipherText, getFrontendSecret());
+  const decrypted = bytes.toString(CryptoJS.enc.Utf8);
+
+  if (!decrypted) {
+    throw new Error('Unable to decrypt frontend field');
+  }
+
+  return decrypted;
+};
+
+export const encryptFrontendField = (value: string): string => {
+  return CryptoJS.AES.encrypt(value, getFrontendSecret()).toString();
+};
+
 export const encryptBackendLayer = (frontendCipherText: string): string => {
   // Stores the frontend AES cipher inside a second backend AES envelope.
   return CryptoJS.AES.encrypt(frontendCipherText, getBackendSecret()).toString();

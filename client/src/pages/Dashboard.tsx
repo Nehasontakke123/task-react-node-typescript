@@ -1,18 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
+import { useNavigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Plus, Search, ShieldCheck, Users, UserRoundCheck, X } from 'lucide-react';
 import StudentForm from '../components/StudentForm';
 import StudentList from '../components/StudentList';
 import { api } from '../services/api';
-import { decryptPayload, encryptPayload } from '../utils/crypto';
-import type { EncryptedStudent, Student, StudentFormValues } from '../types';
+import { decryptField, encryptField } from '../utils/crypto';
+import { useAuth } from '../context/AuthContext';
+import type { Gender, Student, StudentFormValues } from '../types';
 
 const courses = ['All courses', 'Web Development', 'Data Science', 'Cloud Computing', 'Cybersecurity', 'UI/UX Design'];
 const genders = ['All genders', 'Male', 'Female', 'Other'];
 const pageSize = 6;
 
 const Dashboard = () => {
+  const navigate = useNavigate();
+  const { user: currentUser, logout } = useAuth();
   const [students, setStudents] = useState<Student[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -27,11 +31,16 @@ const Dashboard = () => {
   const fetchStudents = async () => {
     try {
       setIsLoading(true);
-      const { data } = await api.get<{ students: EncryptedStudent[] }>('/students');
-      // Backend removes its AES layer. The browser removes the final frontend AES layer for display.
+      const { data } = await api.get<{ students: any[] }>('/students');
       const decrypted = data.students.map((item) => ({
-        ...decryptPayload<Omit<Student, '_id' | 'createdAt' | 'updatedAt'>>(item.payload),
         _id: item._id,
+        fullName: decryptField(item.fullName),
+        email: decryptField(item.email),
+        phoneNumber: decryptField(item.phoneNumber),
+        dateOfBirth: decryptField(item.dateOfBirth),
+        gender: decryptField(item.gender) as Gender,
+        address: decryptField(item.address),
+        courseEnrolled: decryptField(item.courseEnrolled),
         createdAt: item.createdAt,
         updatedAt: item.updatedAt,
       }));
@@ -78,12 +87,21 @@ const Dashboard = () => {
   const handleSubmit = async (values: StudentFormValues) => {
     try {
       setIsSubmitting(true);
-      const payload = encryptPayload(values);
+      const encryptedFields = {
+        fullName: encryptField(values.fullName),
+        email: encryptField(values.email),
+        phoneNumber: encryptField(values.phoneNumber),
+        dateOfBirth: encryptField(values.dateOfBirth),
+        gender: encryptField(values.gender),
+        address: encryptField(values.address),
+        courseEnrolled: encryptField(values.courseEnrolled),
+        password: values.password ? encryptField(values.password) : undefined,
+      };
       if (editingStudent) {
-        await api.put(`/student/${editingStudent._id}`, { payload });
+        await api.put(`/student/${editingStudent._id}`, encryptedFields);
         toast.success('Student updated');
       } else {
-        await api.post('/register', { payload });
+        await api.post('/register', encryptedFields);
         toast.success('Student registered');
       }
       setFormOpen(false);
@@ -101,8 +119,15 @@ const Dashboard = () => {
     try {
       await api.delete(`/student/${deleteTarget._id}`);
       toast.success('Student deleted');
-      setDeleteTarget(null);
-      await fetchStudents();
+      if (currentUser && deleteTarget._id === currentUser.id) {
+        localStorage.clear();
+        sessionStorage.clear();
+        logout();
+        navigate('/login');
+      } else {
+        setDeleteTarget(null);
+        await fetchStudents();
+      }
     } catch (error: any) {
       toast.error(error.response?.data?.message || 'Unable to delete student');
     }

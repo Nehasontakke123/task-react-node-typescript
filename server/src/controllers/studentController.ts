@@ -3,12 +3,14 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { validationResult } from 'express-validator';
 import { Student } from '../models/Student.js';
-import { createEmailHash, decryptBackendLayer, decryptFrontendPayload, encryptBackendLayer, encryptFrontendPayload, type StudentPayload } from '../utils/crypto.js';
+import {
+  createEmailHash,
+  decryptBackendLayer,
+  encryptBackendLayer,
+  decryptFrontendField,
+  type StudentPayload
+} from '../utils/crypto.js';
 
-const publicPayload = (payload: StudentPayload) => {
-  const { password: _password, ...student } = payload;
-  return student;
-};
 
 const validateStudentPayload = (payload: StudentPayload, requirePassword: boolean) => {
   const errors: string[] = [];
@@ -42,14 +44,34 @@ export const registerStudent = async (req: Request, res: Response) => {
   try {
     if (validationErrors(req, res)) return;
 
-    const { payload } = req.body as { payload: string };
-    const decrypted = decryptFrontendPayload<StudentPayload>(payload);
+    const { fullName, email, phoneNumber, dateOfBirth, gender, address, courseEnrolled, password } = req.body as {
+      fullName: string;
+      email: string;
+      phoneNumber: string;
+      dateOfBirth: string;
+      gender: string;
+      address: string;
+      courseEnrolled: string;
+      password?: string;
+    };
+
+    const decrypted: StudentPayload = {
+      fullName: decryptFrontendField(fullName),
+      email: decryptFrontendField(email),
+      phoneNumber: decryptFrontendField(phoneNumber),
+      dateOfBirth: decryptFrontendField(dateOfBirth),
+      gender: decryptFrontendField(gender) as 'Male' | 'Female' | 'Other',
+      address: decryptFrontendField(address),
+      courseEnrolled: decryptFrontendField(courseEnrolled),
+      password: password ? decryptFrontendField(password) : undefined,
+    };
+
     const payloadErrors = validateStudentPayload(decrypted, true);
     if (payloadErrors.length) {
       return res.status(422).json({ message: 'Student data validation failed', errors: payloadErrors });
     }
-    const emailHash = createEmailHash(decrypted.email);
 
+    const emailHash = createEmailHash(decrypted.email);
     const existing = await Student.findOne({ emailHash });
     if (existing) {
       return res.status(409).json({ message: 'A student with this email already exists' });
@@ -60,12 +82,18 @@ export const registerStudent = async (req: Request, res: Response) => {
     }
 
     const passwordHash = await bcrypt.hash(decrypted.password, 12);
-    const frontendCipherWithoutPassword = encryptFrontendPayload(publicPayload(decrypted));
 
     await Student.create({
-      payload: encryptBackendLayer(frontendCipherWithoutPassword),
+      fullName: encryptBackendLayer(fullName),
+      email: encryptBackendLayer(email),
+      phoneNumber: encryptBackendLayer(phoneNumber),
+      dateOfBirth: encryptBackendLayer(dateOfBirth),
+      gender: encryptBackendLayer(gender),
+      address: encryptBackendLayer(address),
+      courseEnrolled: encryptBackendLayer(courseEnrolled),
       emailHash,
       passwordHash,
+      isDeleted: false,
     });
 
     return res.status(201).json({ message: 'Student registered successfully' });
@@ -80,33 +108,36 @@ export const loginStudent = async (req: Request, res: Response) => {
     if (validationErrors(req, res)) return;
 
     const { email, password } = req.body as { email: string; password: string };
-    const student = await Student.findOne({ emailHash: createEmailHash(email) });
+    const decryptedEmail = decryptFrontendField(email);
+    const decryptedPassword = decryptFrontendField(password);
+
+    const emailHash = createEmailHash(decryptedEmail);
+    const student = await Student.findOne({ emailHash, isDeleted: { $ne: true } });
 
     if (!student) {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
-    const matches = await bcrypt.compare(password, student.passwordHash);
+    const matches = await bcrypt.compare(decryptedPassword, student.passwordHash);
     if (!matches) {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
-    const frontendCipher = decryptBackendLayer(student.payload);
-    const decrypted = decryptFrontendPayload<StudentPayload>(frontendCipher);
+    const decryptedFullName = decryptFrontendField(decryptBackendLayer(student.fullName));
     const jwtSecret = process.env.JWT_SECRET;
 
     if (!jwtSecret) {
       return res.status(500).json({ message: 'JWT_SECRET is missing' });
     }
 
-    const token = jwt.sign({ id: student._id.toString(), email: decrypted.email }, jwtSecret, { expiresIn: '1d' });
+    const token = jwt.sign({ id: student._id.toString(), email: decryptedEmail }, jwtSecret, { expiresIn: '1d' });
 
     return res.json({
       token,
       user: {
         id: student._id.toString(),
-        email: decrypted.email,
-        fullName: decrypted.fullName,
+        email: decryptedEmail,
+        fullName: decryptedFullName,
       },
     });
   } catch (error) {
@@ -117,13 +148,35 @@ export const loginStudent = async (req: Request, res: Response) => {
 
 export const getStudents = async (_req: Request, res: Response) => {
   try {
-    const students = await Student.find().sort({ createdAt: -1 });
-    const response = students.map((student) => ({
-      _id: student._id.toString(),
-      payload: decryptBackendLayer(student.payload),
-      createdAt: student.createdAt,
-      updatedAt: student.updatedAt,
-    }));
+    const students = await Student.find({ isDeleted: { $ne: true } }).sort({ createdAt: -1 });
+    const response: any[] = [];
+
+    for (const student of students) {
+      try {
+        // Guard against legacy documents that may be missing new field-level fields
+        if (!student.fullName || !student.email) {
+          console.warn(`Skipping legacy student record ${student._id} — missing field-level encrypted fields.`);
+          continue;
+        }
+        response.push({
+          _id: student._id.toString(),
+          // decryptBackendLayer returns the frontend cipher (inner envelope)
+          // The client calls decryptField() on each to get the final plaintext
+          fullName: decryptBackendLayer(student.fullName),
+          email: decryptBackendLayer(student.email),
+          phoneNumber: decryptBackendLayer(student.phoneNumber),
+          dateOfBirth: decryptBackendLayer(student.dateOfBirth),
+          gender: decryptBackendLayer(student.gender),
+          address: decryptBackendLayer(student.address),
+          courseEnrolled: decryptBackendLayer(student.courseEnrolled),
+          createdAt: student.createdAt,
+          updatedAt: student.updatedAt,
+        });
+      } catch (fieldErr) {
+        console.error(`Failed to decrypt student record ${student._id}:`, fieldErr);
+        // Skip corrupt/legacy records instead of crashing the entire list
+      }
+    }
 
     return res.json({ students: response });
   } catch (error) {
@@ -138,30 +191,37 @@ export const getLatestStudents = async (_req: Request, res: Response) => {
     today.setHours(0, 0, 0, 0);
 
     const [students, allStudents, totalStudents, registeredToday] = await Promise.all([
-      Student.find().sort({ createdAt: -1 }).limit(5),
-      Student.find().select('payload'),
-      Student.countDocuments(),
-      Student.countDocuments({ createdAt: { $gte: today } }),
+      Student.find({ isDeleted: { $ne: true } }).sort({ createdAt: -1 }).limit(5),
+      Student.find({ isDeleted: { $ne: true } }).select('fullName courseEnrolled'),
+      Student.countDocuments({ isDeleted: { $ne: true } }),
+      Student.countDocuments({ isDeleted: { $ne: true }, createdAt: { $gte: today } }),
     ]);
 
-    const activeCourses = new Set(
-      allStudents.map((student) => {
-        const frontendCipher = decryptBackendLayer(student.payload);
-        return decryptFrontendPayload<StudentPayload>(frontendCipher).courseEnrolled;
-      }),
-    );
+    // Guard for legacy documents missing encrypted fields
+    const activeCourses = new Set<string>();
+    for (const student of allStudents) {
+      try {
+        if (!student.courseEnrolled) continue;
+        const decrypted = decryptFrontendField(decryptBackendLayer(student.courseEnrolled));
+        activeCourses.add(decrypted);
+      } catch (e) {
+        console.error(`Failed to decrypt course for student ${student._id}:`, e);
+      }
+    }
 
-    const latestStudents = students.map((student) => {
-      const frontendCipher = decryptBackendLayer(student.payload);
-      const decrypted = decryptFrontendPayload<StudentPayload>(frontendCipher);
-
-      return {
-        _id: student._id.toString(),
-        fullName: decrypted.fullName,
-        courseEnrolled: decrypted.courseEnrolled,
-        createdAt: student.createdAt,
-      };
-    });
+    const latestStudents = [] as any[];
+    for (const student of students) {
+      try {
+        latestStudents.push({
+          _id: student._id.toString(),
+          fullName: decryptFrontendField(decryptBackendLayer(student.fullName)),
+          courseEnrolled: decryptFrontendField(decryptBackendLayer(student.courseEnrolled)),
+          createdAt: student.createdAt,
+        });
+      } catch (e) {
+        console.error(`Failed to decrypt latest student ${student._id}:`, e);
+      }
+    }
 
     return res.json({
       students: latestStudents,
@@ -183,14 +243,34 @@ export const updateStudent = async (req: Request, res: Response) => {
     if (validationErrors(req, res)) return;
 
     const { id } = req.params;
-    const { payload } = req.body as { payload: string };
-    const decrypted = decryptFrontendPayload<StudentPayload>(payload);
+    const { fullName, email, phoneNumber, dateOfBirth, gender, address, courseEnrolled, password } = req.body as {
+      fullName: string;
+      email: string;
+      phoneNumber: string;
+      dateOfBirth: string;
+      gender: string;
+      address: string;
+      courseEnrolled: string;
+      password?: string;
+    };
+
+    const decrypted: StudentPayload = {
+      fullName: decryptFrontendField(fullName),
+      email: decryptFrontendField(email),
+      phoneNumber: decryptFrontendField(phoneNumber),
+      dateOfBirth: decryptFrontendField(dateOfBirth),
+      gender: decryptFrontendField(gender) as 'Male' | 'Female' | 'Other',
+      address: decryptFrontendField(address),
+      courseEnrolled: decryptFrontendField(courseEnrolled),
+      password: password ? decryptFrontendField(password) : undefined,
+    };
+
     const payloadErrors = validateStudentPayload(decrypted, false);
     if (payloadErrors.length) {
       return res.status(422).json({ message: 'Student data validation failed', errors: payloadErrors });
     }
-    const student = await Student.findById(id);
 
+    const student = await Student.findOne({ _id: id, isDeleted: { $ne: true } });
     if (!student) {
       return res.status(404).json({ message: 'Student not found' });
     }
@@ -201,9 +281,15 @@ export const updateStudent = async (req: Request, res: Response) => {
       return res.status(409).json({ message: 'Another student already uses this email' });
     }
 
-    const frontendCipherWithoutPassword = encryptFrontendPayload(publicPayload(decrypted));
-    student.payload = encryptBackendLayer(frontendCipherWithoutPassword);
+    student.fullName = encryptBackendLayer(fullName);
+    student.email = encryptBackendLayer(email);
+    student.phoneNumber = encryptBackendLayer(phoneNumber);
+    student.dateOfBirth = encryptBackendLayer(dateOfBirth);
+    student.gender = encryptBackendLayer(gender);
+    student.address = encryptBackendLayer(address);
+    student.courseEnrolled = encryptBackendLayer(courseEnrolled);
     student.emailHash = emailHash;
+
     if (decrypted.password) {
       student.passwordHash = await bcrypt.hash(decrypted.password, 12);
     }
@@ -218,10 +304,12 @@ export const updateStudent = async (req: Request, res: Response) => {
 
 export const deleteStudent = async (req: Request, res: Response) => {
   try {
-    const deleted = await Student.findByIdAndDelete(req.params.id);
-    if (!deleted) {
+    const student = await Student.findById(req.params.id);
+    if (!student || student.isDeleted) {
       return res.status(404).json({ message: 'Student not found' });
     }
+    student.isDeleted = true;
+    await student.save();
     return res.json({ message: 'Student deleted successfully' });
   } catch (error) {
     console.error(error);

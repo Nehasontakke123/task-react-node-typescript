@@ -5,7 +5,7 @@ import { motion } from 'framer-motion';
 import { ShieldCheck } from 'lucide-react';
 import StudentForm from '../components/StudentForm';
 import { api } from '../services/api';
-import { encryptPayload } from '../utils/crypto';
+import { encryptField } from '../utils/crypto';
 import type { StudentFormValues } from '../types';
 
 const Register = () => {
@@ -16,7 +16,17 @@ const Register = () => {
     try {
       setIsSubmitting(true);
       const { confirmPassword: _confirmPassword, ...payload } = values;
-      await api.post('/register', { payload: encryptPayload(payload) });
+      const encryptedFields = {
+        fullName: encryptField(payload.fullName),
+        email: encryptField(payload.email),
+        phoneNumber: encryptField(payload.phoneNumber),
+        dateOfBirth: encryptField(payload.dateOfBirth),
+        gender: encryptField(payload.gender),
+        address: encryptField(payload.address),
+        courseEnrolled: encryptField(payload.courseEnrolled),
+        password: encryptField(payload.password),
+      };
+      await api.post('/register', encryptedFields);
       toast.success('Student registered. Please sign in.');
       navigate('/login');
     } catch (error: any) {

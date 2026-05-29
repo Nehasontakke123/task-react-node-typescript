@@ -25,8 +25,11 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem('studentflow_token');
-      localStorage.removeItem('studentflow_user');
+      // Clear auth data but do not force a full page navigation.
+      // The UI can handle token expiration gracefully (e.g., show login page).
+      localStorage.clear();
+      sessionStorage.clear();
+      console.warn('Unauthorized request – token cleared.');
     }
     return Promise.reject(error);
   },
